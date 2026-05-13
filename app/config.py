@@ -4,9 +4,9 @@ from pathlib import Path
 
 @dataclass
 class DataGenerationConfig:
-    n_users: int = 500
-    n_products: int = 300
-    n_interactions: int = 6000
+    n_users: int = 1000
+    n_products: int = 500
+    n_interactions: int = 10000
     random_seed: int = 42
 
 
