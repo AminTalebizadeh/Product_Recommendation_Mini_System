@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import joblib
-import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
