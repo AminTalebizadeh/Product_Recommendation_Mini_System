@@ -15,6 +15,9 @@ logger = get_logger(__name__)
 
 
 def _build_user_profiles(interactions_df: pd.DataFrame, products_df: pd.DataFrame) -> pd.DataFrame:
+    if interactions_df.empty or products_df.empty:
+        return pd.DataFrame(columns=["user_id"])
+
     merged = interactions_df.merge(
         products_df[["product_id", "category"]],
         on="product_id",
@@ -27,13 +30,19 @@ def _build_user_profiles(interactions_df: pd.DataFrame, products_df: pd.DataFram
         merged = merged.drop(columns=["category_product"])
 
     category_pref = (
-        merged.groupby(["user_id", "category"])["event_weight"]
+        merged.groupby(["user_id", "category"], dropna=False)["event_weight"]
         .sum()
         .reset_index(name="category_weight")
     )
 
+    if category_pref.empty:
+        return pd.DataFrame(columns=["user_id"])
+
     category_total = category_pref.groupby("user_id")["category_weight"].transform("sum")
-    category_pref["category_preference_score"] = category_pref["category_weight"] / category_total
+
+    category_pref["category_preference_score"] = (
+        category_pref["category_weight"] / category_total.replace(0, pd.NA)
+    ).fillna(0.0)
 
     pivot = category_pref.pivot(
         index="user_id",
@@ -47,6 +56,16 @@ def _build_user_profiles(interactions_df: pd.DataFrame, products_df: pd.DataFram
 
 
 def _build_product_popularity(interactions_df: pd.DataFrame) -> pd.DataFrame:
+    if interactions_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "product_id",
+                "interaction_count",
+                "weighted_popularity",
+                "normalized_popularity",
+            ]
+        )
+
     popularity_df = (
         interactions_df.groupby("product_id")
         .agg(
@@ -56,15 +75,37 @@ def _build_product_popularity(interactions_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    scaler = MinMaxScaler()
-    popularity_df["normalized_popularity"] = scaler.fit_transform(
-        popularity_df[["weighted_popularity"]]
-    )
+    if popularity_df.empty:
+        popularity_df["normalized_popularity"] = pd.Series(dtype=float)
+        return popularity_df
+
+    weighted = popularity_df["weighted_popularity"]
+
+    if weighted.empty:
+        popularity_df["normalized_popularity"] = pd.Series(dtype=float)
+    elif weighted.min() == weighted.max():
+        popularity_df["normalized_popularity"] = 0.0
+    else:
+        scaler = MinMaxScaler()
+        popularity_df["normalized_popularity"] = scaler.fit_transform(
+            popularity_df[["weighted_popularity"]]
+        )
 
     return popularity_df
 
 
 def _build_user_product_scores(interactions_df: pd.DataFrame) -> pd.DataFrame:
+    if interactions_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "user_id",
+                "product_id",
+                "interaction_count",
+                "user_product_score",
+                "last_timestamp",
+            ]
+        )
+
     user_product_scores = (
         interactions_df.groupby(["user_id", "product_id"])
         .agg(
@@ -78,6 +119,16 @@ def _build_user_product_scores(interactions_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def preprocess_and_save(config: AppConfig) -> None:
+    def _fillna_only_existing_columns(
+        df: pd.DataFrame,
+        columns: list[str],
+        value: float = 0.0,
+    ) -> pd.DataFrame:
+        existing_columns = [col for col in columns if col in df.columns]
+        if existing_columns:
+            df[existing_columns] = df[existing_columns].fillna(value)
+        return df
+
     ensure_directories(
         [
             config.paths.raw_data_dir,
@@ -90,6 +141,7 @@ def preprocess_and_save(config: AppConfig) -> None:
     users_df, products_df, interactions_df = load_raw_data(config)
     validate_raw_data(users_df, products_df, interactions_df)
 
+    interactions_df = interactions_df.copy()
     interactions_df["timestamp"] = pd.to_datetime(interactions_df["timestamp"])
     interactions_df = interactions_df.sort_values("timestamp").reset_index(drop=True)
 
@@ -97,9 +149,21 @@ def preprocess_and_save(config: AppConfig) -> None:
     product_popularity_df = _build_product_popularity(interactions_df)
     user_product_scores_df = _build_user_product_scores(interactions_df)
 
-    users_processed = users_df.merge(user_profiles_df, on="user_id", how="left").fillna(0.0)
-    products_processed = products_df.merge(product_popularity_df, on="product_id", how="left").fillna(0.0)
-    interactions_processed = interactions_df.copy()
+    users_processed = users_df.merge(user_profiles_df, on="user_id", how="left")
+    users_processed = _fillna_only_existing_columns(
+        users_processed,
+        [col for col in user_profiles_df.columns if col.startswith("pref_")],
+        0.0,
+    )
+
+    products_processed = products_df.merge(product_popularity_df, on="product_id", how="left")
+    products_processed = _fillna_only_existing_columns(
+        products_processed,
+        ["interaction_count", "weighted_popularity", "normalized_popularity"],
+        0.0,
+    )
+
+    interactions_processed = interactions_df.copy(deep=True)
 
     users_processed.to_csv(config.paths.processed_data_dir / "users_processed.csv", index=False)
     products_processed.to_csv(config.paths.processed_data_dir / "products_processed.csv", index=False)
@@ -117,7 +181,7 @@ def preprocess_and_save(config: AppConfig) -> None:
     }
 
     with open(config.paths.processed_data_dir / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
 
     joblib.dump(metadata, config.paths.models_dir / "preprocess_metadata.joblib")
 
