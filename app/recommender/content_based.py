@@ -11,9 +11,11 @@ from app.utils import normalize_scores
 class ContentBasedRecommender:
     def __init__(
         self,
+        users_df: pd.DataFrame,
         products_df: pd.DataFrame,
         interactions_df: pd.DataFrame,
     ) -> None:
+        self.users_df = users_df.copy()
         self.products_df = products_df.copy()
         self.interactions_df = interactions_df.copy()
 
